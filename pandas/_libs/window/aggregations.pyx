@@ -607,22 +607,9 @@ def roll_skew(ndarray[float64_t] values, ndarray[int64_t] start,
         start, end
     )
     output = np.empty(N, dtype=np.float64)
-    min_val = np.nanmin(values)
     values_copy = np.copy(values)
 
     with nogil:
-        for i in range(0, V):
-            val = values_copy[i]
-            if val == val:
-                nobs_mean += 1
-                sum_val += val
-        mean_val = sum_val / nobs_mean
-        # Other cases would lead to imprecision for smallest values
-        if min_val - mean_val > -1e5:
-            mean_val = round(mean_val)
-            for i in range(0, V):
-                values_copy[i] = values_copy[i] - mean_val
-
         for i in range(0, N):
 
             s = start[i]
@@ -822,21 +809,8 @@ def roll_kurt(ndarray[float64_t] values, ndarray[int64_t] start,
     )
     output = np.empty(N, dtype=np.float64)
     values_copy = np.copy(values)
-    min_val = np.nanmin(values)
 
     with nogil:
-        for i in range(0, V):
-            val = values_copy[i]
-            if val == val:
-                nobs_mean += 1
-                sum_val += val
-        mean_val = sum_val / nobs_mean
-        # Other cases would lead to imprecision for smallest values
-        if min_val - mean_val > -1e4:
-            mean_val = round(mean_val)
-            for i in range(0, V):
-                values_copy[i] = values_copy[i] - mean_val
-
         for i in range(0, N):
 
             s = start[i]
