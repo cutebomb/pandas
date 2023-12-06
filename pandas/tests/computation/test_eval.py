@@ -3,7 +3,6 @@ from __future__ import annotations
 from functools import reduce
 from itertools import product
 import operator
-import warnings
 
 import numpy as np
 import pytest
@@ -26,8 +25,11 @@ from pandas.core.dtypes.common import (
 import pandas as pd
 from pandas import (
     DataFrame,
+    Index,
     Series,
     date_range,
+    period_range,
+    timedelta_range,
 )
 import pandas._testing as tm
 from pandas.core.computation import (
@@ -64,7 +66,7 @@ from pandas.core.computation.scope import DEFAULT_GLOBALS
                     reason=f"numexpr enabled->{USE_NUMEXPR}, "
                     f"installed->{NUMEXPR_INSTALLED}",
                 ),
-                td.skip_if_no_ne,
+                td.skip_if_no("numexpr"),
             ],
         )
         for engine in ENGINES
@@ -114,6 +116,18 @@ def lhs(request):
 
 rhs = lhs
 midhs = lhs
+
+
+@pytest.fixture
+def idx_func_dict():
+    return {
+        "i": lambda n: Index(np.arange(n), dtype=np.int64),
+        "f": lambda n: Index(np.arange(n), dtype=np.float64),
+        "s": lambda n: Index([f"{i}_{chr(i)}" for i in range(97, 97 + n)]),
+        "dt": lambda n: date_range("2020-01-01", periods=n),
+        "td": lambda n: timedelta_range("1 day", periods=n),
+        "p": lambda n: period_range("2020-01-01", periods=n, freq="D"),
+    }
 
 
 class TestEval:
@@ -195,7 +209,7 @@ class TestEval:
                 reason="Looks like expected is negative, unclear whether "
                 "expected is incorrect or result is incorrect"
             )
-            request.node.add_marker(mark)
+            request.applymarker(mark)
         skip_these = ["in", "not in"]
         ex = f"~(lhs {op} rhs)"
 
@@ -543,6 +557,9 @@ class TestEval:
 
     def test_scalar_unary(self, engine, parser):
         msg = "bad operand type for unary ~: 'float'"
+        warn = None
+        if PY312 and not (engine == "numexpr" and parser == "pandas"):
+            warn = DeprecationWarning
         with pytest.raises(TypeError, match=msg):
             pd.eval("~1.0", engine=engine, parser=parser)
 
@@ -551,8 +568,14 @@ class TestEval:
         assert pd.eval("~1", parser=parser, engine=engine) == ~1
         assert pd.eval("-1", parser=parser, engine=engine) == -1
         assert pd.eval("+1", parser=parser, engine=engine) == +1
-        assert pd.eval("~True", parser=parser, engine=engine) == ~True
-        assert pd.eval("~False", parser=parser, engine=engine) == ~False
+        with tm.assert_produces_warning(
+            warn, match="Bitwise inversion", check_stacklevel=False
+        ):
+            assert pd.eval("~True", parser=parser, engine=engine) == ~True
+        with tm.assert_produces_warning(
+            warn, match="Bitwise inversion", check_stacklevel=False
+        ):
+            assert pd.eval("~False", parser=parser, engine=engine) == ~False
         assert pd.eval("-True", parser=parser, engine=engine) == -True
         assert pd.eval("-False", parser=parser, engine=engine) == -False
         assert pd.eval("+True", parser=parser, engine=engine) == +True
@@ -716,9 +739,6 @@ class TestEval:
         assert pd.eval(f"{event.str.match('hello').a and event.str.match('hello').a}")
 
 
-f = lambda *args, **kwargs: np.random.default_rng(2).standard_normal()
-
-
 # -------------------------------------
 # gh-12388: Typecasting rules consistency with python
 
@@ -726,11 +746,11 @@ f = lambda *args, **kwargs: np.random.default_rng(2).standard_normal()
 class TestTypeCasting:
     @pytest.mark.parametrize("op", ["+", "-", "*", "**", "/"])
     # maybe someday... numexpr has too many upcasting rules now
-    # chain(*(np.sctypes[x] for x in ['uint', 'int', 'float']))
+    # chain(*(np.core.sctypes[x] for x in ['uint', 'int', 'float']))
     @pytest.mark.parametrize("dt", [np.float32, np.float64])
     @pytest.mark.parametrize("left_right", [("df", "3"), ("3", "df")])
     def test_binop_typecasting(self, engine, parser, op, dt, left_right):
-        df = tm.makeCustomDataframe(5, 3, data_gen_f=f, dtype=dt)
+        df = DataFrame(np.random.default_rng(2).standard_normal((5, 3)), dtype=dt)
         left, right = left_right
         s = f"{left} {op} {right}"
         res = pd.eval(s, engine=engine, parser=parser)
@@ -757,38 +777,44 @@ class TestAlignment:
 
     def test_align_nested_unary_op(self, engine, parser):
         s = "df * ~2"
-        df = tm.makeCustomDataframe(5, 3, data_gen_f=f)
+        df = DataFrame(np.random.default_rng(2).standard_normal((5, 3)))
         res = pd.eval(s, engine=engine, parser=parser)
         tm.assert_frame_equal(res, df * ~2)
 
+    @pytest.mark.filterwarnings("always::RuntimeWarning")
     @pytest.mark.parametrize("lr_idx_type", lhs_index_types)
     @pytest.mark.parametrize("rr_idx_type", index_types)
     @pytest.mark.parametrize("c_idx_type", index_types)
     def test_basic_frame_alignment(
-        self, engine, parser, lr_idx_type, rr_idx_type, c_idx_type
+        self, engine, parser, lr_idx_type, rr_idx_type, c_idx_type, idx_func_dict
     ):
-        with warnings.catch_warnings(record=True):
-            warnings.simplefilter("always", RuntimeWarning)
-
-            df = tm.makeCustomDataframe(
-                10, 10, data_gen_f=f, r_idx_type=lr_idx_type, c_idx_type=c_idx_type
-            )
-            df2 = tm.makeCustomDataframe(
-                20, 10, data_gen_f=f, r_idx_type=rr_idx_type, c_idx_type=c_idx_type
-            )
-            # only warns if not monotonic and not sortable
-            if should_warn(df.index, df2.index):
-                with tm.assert_produces_warning(RuntimeWarning):
-                    res = pd.eval("df + df2", engine=engine, parser=parser)
-            else:
+        df = DataFrame(
+            np.random.default_rng(2).standard_normal((10, 10)),
+            index=idx_func_dict[lr_idx_type](10),
+            columns=idx_func_dict[c_idx_type](10),
+        )
+        df2 = DataFrame(
+            np.random.default_rng(2).standard_normal((20, 10)),
+            index=idx_func_dict[rr_idx_type](20),
+            columns=idx_func_dict[c_idx_type](10),
+        )
+        # only warns if not monotonic and not sortable
+        if should_warn(df.index, df2.index):
+            with tm.assert_produces_warning(RuntimeWarning):
                 res = pd.eval("df + df2", engine=engine, parser=parser)
-            tm.assert_frame_equal(res, df + df2)
+        else:
+            res = pd.eval("df + df2", engine=engine, parser=parser)
+        tm.assert_frame_equal(res, df + df2)
 
     @pytest.mark.parametrize("r_idx_type", lhs_index_types)
     @pytest.mark.parametrize("c_idx_type", lhs_index_types)
-    def test_frame_comparison(self, engine, parser, r_idx_type, c_idx_type):
-        df = tm.makeCustomDataframe(
-            10, 10, data_gen_f=f, r_idx_type=r_idx_type, c_idx_type=c_idx_type
+    def test_frame_comparison(
+        self, engine, parser, r_idx_type, c_idx_type, idx_func_dict
+    ):
+        df = DataFrame(
+            np.random.default_rng(2).standard_normal((10, 10)),
+            index=idx_func_dict[r_idx_type](10),
+            columns=idx_func_dict[c_idx_type](10),
         )
         res = pd.eval("df < 2", engine=engine, parser=parser)
         tm.assert_frame_equal(res, df < 2)
@@ -801,55 +827,62 @@ class TestAlignment:
         res = pd.eval("df < df3", engine=engine, parser=parser)
         tm.assert_frame_equal(res, df < df3)
 
+    @pytest.mark.filterwarnings("ignore::RuntimeWarning")
     @pytest.mark.parametrize("r1", lhs_index_types)
     @pytest.mark.parametrize("c1", index_types)
     @pytest.mark.parametrize("r2", index_types)
     @pytest.mark.parametrize("c2", index_types)
-    def test_medium_complex_frame_alignment(self, engine, parser, r1, c1, r2, c2):
-        with warnings.catch_warnings(record=True):
-            warnings.simplefilter("always", RuntimeWarning)
-
-            df = tm.makeCustomDataframe(
-                3, 2, data_gen_f=f, r_idx_type=r1, c_idx_type=c1
-            )
-            df2 = tm.makeCustomDataframe(
-                4, 2, data_gen_f=f, r_idx_type=r2, c_idx_type=c2
-            )
-            df3 = tm.makeCustomDataframe(
-                5, 2, data_gen_f=f, r_idx_type=r2, c_idx_type=c2
-            )
-            if should_warn(df.index, df2.index, df3.index):
-                with tm.assert_produces_warning(RuntimeWarning):
-                    res = pd.eval("df + df2 + df3", engine=engine, parser=parser)
-            else:
+    def test_medium_complex_frame_alignment(
+        self, engine, parser, r1, c1, r2, c2, idx_func_dict
+    ):
+        df = DataFrame(
+            np.random.default_rng(2).standard_normal((3, 2)),
+            index=idx_func_dict[r1](3),
+            columns=idx_func_dict[c1](2),
+        )
+        df2 = DataFrame(
+            np.random.default_rng(2).standard_normal((4, 2)),
+            index=idx_func_dict[r2](4),
+            columns=idx_func_dict[c2](2),
+        )
+        df3 = DataFrame(
+            np.random.default_rng(2).standard_normal((5, 2)),
+            index=idx_func_dict[r2](5),
+            columns=idx_func_dict[c2](2),
+        )
+        if should_warn(df.index, df2.index, df3.index):
+            with tm.assert_produces_warning(RuntimeWarning):
                 res = pd.eval("df + df2 + df3", engine=engine, parser=parser)
-            tm.assert_frame_equal(res, df + df2 + df3)
+        else:
+            res = pd.eval("df + df2 + df3", engine=engine, parser=parser)
+        tm.assert_frame_equal(res, df + df2 + df3)
 
+    @pytest.mark.filterwarnings("ignore::RuntimeWarning")
     @pytest.mark.parametrize("index_name", ["index", "columns"])
     @pytest.mark.parametrize("c_idx_type", index_types)
     @pytest.mark.parametrize("r_idx_type", lhs_index_types)
     def test_basic_frame_series_alignment(
-        self, engine, parser, index_name, r_idx_type, c_idx_type
+        self, engine, parser, index_name, r_idx_type, c_idx_type, idx_func_dict
     ):
-        with warnings.catch_warnings(record=True):
-            warnings.simplefilter("always", RuntimeWarning)
-            df = tm.makeCustomDataframe(
-                10, 10, data_gen_f=f, r_idx_type=r_idx_type, c_idx_type=c_idx_type
-            )
-            index = getattr(df, index_name)
-            s = Series(np.random.default_rng(2).standard_normal(5), index[:5])
+        df = DataFrame(
+            np.random.default_rng(2).standard_normal((10, 10)),
+            index=idx_func_dict[r_idx_type](10),
+            columns=idx_func_dict[c_idx_type](10),
+        )
+        index = getattr(df, index_name)
+        s = Series(np.random.default_rng(2).standard_normal(5), index[:5])
 
-            if should_warn(df.index, s.index):
-                with tm.assert_produces_warning(RuntimeWarning):
-                    res = pd.eval("df + s", engine=engine, parser=parser)
-            else:
+        if should_warn(df.index, s.index):
+            with tm.assert_produces_warning(RuntimeWarning):
                 res = pd.eval("df + s", engine=engine, parser=parser)
+        else:
+            res = pd.eval("df + s", engine=engine, parser=parser)
 
-            if r_idx_type == "dt" or c_idx_type == "dt":
-                expected = df.add(s) if engine == "numexpr" else df + s
-            else:
-                expected = df + s
-            tm.assert_frame_equal(res, expected)
+        if r_idx_type == "dt" or c_idx_type == "dt":
+            expected = df.add(s) if engine == "numexpr" else df + s
+        else:
+            expected = df + s
+        tm.assert_frame_equal(res, expected)
 
     @pytest.mark.parametrize("index_name", ["index", "columns"])
     @pytest.mark.parametrize(
@@ -858,7 +891,7 @@ class TestAlignment:
     )
     @pytest.mark.filterwarnings("ignore::RuntimeWarning")
     def test_basic_series_frame_alignment(
-        self, request, engine, parser, index_name, r_idx_type, c_idx_type
+        self, request, engine, parser, index_name, r_idx_type, c_idx_type, idx_func_dict
     ):
         if (
             engine == "numexpr"
@@ -872,9 +905,11 @@ class TestAlignment:
                 f"parser={parser}, index_name={index_name}, "
                 f"r_idx_type={r_idx_type}, c_idx_type={c_idx_type}"
             )
-            request.node.add_marker(pytest.mark.xfail(reason=reason, strict=False))
-        df = tm.makeCustomDataframe(
-            10, 7, data_gen_f=f, r_idx_type=r_idx_type, c_idx_type=c_idx_type
+            request.applymarker(pytest.mark.xfail(reason=reason, strict=False))
+        df = DataFrame(
+            np.random.default_rng(2).standard_normal((10, 7)),
+            index=idx_func_dict[r_idx_type](10),
+            columns=idx_func_dict[c_idx_type](7),
         )
         index = getattr(df, index_name)
         s = Series(np.random.default_rng(2).standard_normal(5), index[:5])
@@ -890,84 +925,84 @@ class TestAlignment:
             expected = s + df
         tm.assert_frame_equal(res, expected)
 
+    @pytest.mark.filterwarnings("ignore::RuntimeWarning")
     @pytest.mark.parametrize("c_idx_type", index_types)
     @pytest.mark.parametrize("r_idx_type", lhs_index_types)
     @pytest.mark.parametrize("index_name", ["index", "columns"])
     @pytest.mark.parametrize("op", ["+", "*"])
     def test_series_frame_commutativity(
-        self, engine, parser, index_name, op, r_idx_type, c_idx_type
+        self, engine, parser, index_name, op, r_idx_type, c_idx_type, idx_func_dict
     ):
-        with warnings.catch_warnings(record=True):
-            warnings.simplefilter("always", RuntimeWarning)
+        df = DataFrame(
+            np.random.default_rng(2).standard_normal((10, 10)),
+            index=idx_func_dict[r_idx_type](10),
+            columns=idx_func_dict[c_idx_type](10),
+        )
+        index = getattr(df, index_name)
+        s = Series(np.random.default_rng(2).standard_normal(5), index[:5])
 
-            df = tm.makeCustomDataframe(
-                10, 10, data_gen_f=f, r_idx_type=r_idx_type, c_idx_type=c_idx_type
-            )
-            index = getattr(df, index_name)
-            s = Series(np.random.default_rng(2).standard_normal(5), index[:5])
-
-            lhs = f"s {op} df"
-            rhs = f"df {op} s"
-            if should_warn(df.index, s.index):
-                with tm.assert_produces_warning(RuntimeWarning):
-                    a = pd.eval(lhs, engine=engine, parser=parser)
-                with tm.assert_produces_warning(RuntimeWarning):
-                    b = pd.eval(rhs, engine=engine, parser=parser)
-            else:
+        lhs = f"s {op} df"
+        rhs = f"df {op} s"
+        if should_warn(df.index, s.index):
+            with tm.assert_produces_warning(RuntimeWarning):
                 a = pd.eval(lhs, engine=engine, parser=parser)
+            with tm.assert_produces_warning(RuntimeWarning):
                 b = pd.eval(rhs, engine=engine, parser=parser)
+        else:
+            a = pd.eval(lhs, engine=engine, parser=parser)
+            b = pd.eval(rhs, engine=engine, parser=parser)
 
-            if r_idx_type != "dt" and c_idx_type != "dt":
-                if engine == "numexpr":
-                    tm.assert_frame_equal(a, b)
+        if r_idx_type != "dt" and c_idx_type != "dt":
+            if engine == "numexpr":
+                tm.assert_frame_equal(a, b)
 
+    @pytest.mark.filterwarnings("always::RuntimeWarning")
     @pytest.mark.parametrize("r1", lhs_index_types)
     @pytest.mark.parametrize("c1", index_types)
     @pytest.mark.parametrize("r2", index_types)
     @pytest.mark.parametrize("c2", index_types)
-    def test_complex_series_frame_alignment(self, engine, parser, r1, c1, r2, c2):
+    def test_complex_series_frame_alignment(
+        self, engine, parser, r1, c1, r2, c2, idx_func_dict
+    ):
         n = 3
         m1 = 5
         m2 = 2 * m1
+        df = DataFrame(
+            np.random.default_rng(2).standard_normal((m1, n)),
+            index=idx_func_dict[r1](m1),
+            columns=idx_func_dict[c1](n),
+        )
+        df2 = DataFrame(
+            np.random.default_rng(2).standard_normal((m2, n)),
+            index=idx_func_dict[r2](m2),
+            columns=idx_func_dict[c2](n),
+        )
+        index = df2.columns
+        ser = Series(np.random.default_rng(2).standard_normal(n), index[:n])
 
-        with warnings.catch_warnings(record=True):
-            warnings.simplefilter("always", RuntimeWarning)
-
-            index_name = np.random.default_rng(2).choice(["index", "columns"])
-            obj_name = np.random.default_rng(2).choice(["df", "df2"])
-
-            df = tm.makeCustomDataframe(
-                m1, n, data_gen_f=f, r_idx_type=r1, c_idx_type=c1
-            )
-            df2 = tm.makeCustomDataframe(
-                m2, n, data_gen_f=f, r_idx_type=r2, c_idx_type=c2
-            )
-            index = getattr(locals().get(obj_name), index_name)
-            ser = Series(np.random.default_rng(2).standard_normal(n), index[:n])
-
-            if r2 == "dt" or c2 == "dt":
-                if engine == "numexpr":
-                    expected2 = df2.add(ser)
-                else:
-                    expected2 = df2 + ser
+        if r2 == "dt" or c2 == "dt":
+            if engine == "numexpr":
+                expected2 = df2.add(ser)
             else:
                 expected2 = df2 + ser
+        else:
+            expected2 = df2 + ser
 
-            if r1 == "dt" or c1 == "dt":
-                if engine == "numexpr":
-                    expected = expected2.add(df)
-                else:
-                    expected = expected2 + df
+        if r1 == "dt" or c1 == "dt":
+            if engine == "numexpr":
+                expected = expected2.add(df)
             else:
                 expected = expected2 + df
+        else:
+            expected = expected2 + df
 
-            if should_warn(df2.index, ser.index, df.index):
-                with tm.assert_produces_warning(RuntimeWarning):
-                    res = pd.eval("df2 + ser + df", engine=engine, parser=parser)
-            else:
+        if should_warn(df2.index, ser.index, df.index):
+            with tm.assert_produces_warning(RuntimeWarning):
                 res = pd.eval("df2 + ser + df", engine=engine, parser=parser)
-            assert res.shape == expected.shape
-            tm.assert_frame_equal(res, expected)
+        else:
+            res = pd.eval("df2 + ser + df", engine=engine, parser=parser)
+        assert res.shape == expected.shape
+        tm.assert_frame_equal(res, expected)
 
     def test_performance_warning_for_poor_alignment(self, engine, parser):
         df = DataFrame(np.random.default_rng(2).standard_normal((1000, 10)))
@@ -1254,7 +1289,7 @@ class TestOperations:
         expected["c"] = expected["a"] + expected["b"]
         tm.assert_frame_equal(df, expected)
 
-    def test_multi_line_expression(self):
+    def test_multi_line_expression(self, warn_copy_on_write):
         # GH 11149
         df = DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]})
         expected = df.copy()
@@ -1428,8 +1463,10 @@ class TestOperations:
             self.eval(expression, target=target, inplace=True)
 
     def test_basic_period_index_boolean_expression(self):
-        df = tm.makeCustomDataframe(2, 2, data_gen_f=f, c_idx_type="p", r_idx_type="i")
-
+        df = DataFrame(
+            np.random.default_rng(2).standard_normal((2, 2)),
+            columns=period_range("2020-01-01", freq="D", periods=2),
+        )
         e = df < 2
         r = self.eval("df < 2", local_dict={"df": df})
         x = df < 2
@@ -1438,13 +1475,19 @@ class TestOperations:
         tm.assert_frame_equal(x, e)
 
     def test_basic_period_index_subscript_expression(self):
-        df = tm.makeCustomDataframe(2, 2, data_gen_f=f, c_idx_type="p", r_idx_type="i")
+        df = DataFrame(
+            np.random.default_rng(2).standard_normal((2, 2)),
+            columns=period_range("2020-01-01", freq="D", periods=2),
+        )
         r = self.eval("df[df < 2 + 3]", local_dict={"df": df})
         e = df[df < 2 + 3]
         tm.assert_frame_equal(r, e)
 
     def test_nested_period_index_subscript_expression(self):
-        df = tm.makeCustomDataframe(2, 2, data_gen_f=f, c_idx_type="p", r_idx_type="i")
+        df = DataFrame(
+            np.random.default_rng(2).standard_normal((2, 2)),
+            columns=period_range("2020-01-01", freq="D", periods=2),
+        )
         r = self.eval("df[df[df < 2] < 2] + df * 2", local_dict={"df": df})
         e = df[df[df < 2] < 2] + df * 2
         tm.assert_frame_equal(r, e)
@@ -1706,14 +1749,14 @@ class TestScope:
             pd.eval(e, engine=engine, parser=parser, global_dict={})
 
 
-@td.skip_if_no_ne
+@td.skip_if_no("numexpr")
 def test_invalid_engine():
     msg = "Invalid engine 'asdf' passed"
     with pytest.raises(KeyError, match=msg):
         pd.eval("x + y", local_dict={"x": 1, "y": 2}, engine="asdf")
 
 
-@td.skip_if_no_ne
+@td.skip_if_no("numexpr")
 @pytest.mark.parametrize(
     ("use_numexpr", "expected"),
     (
@@ -1730,7 +1773,7 @@ def test_numexpr_option_respected(use_numexpr, expected):
         assert result == expected
 
 
-@td.skip_if_no_ne
+@td.skip_if_no("numexpr")
 def test_numexpr_option_incompatible_op():
     # GH 32556
     with pd.option_context("compute.use_numexpr", False):
@@ -1742,7 +1785,7 @@ def test_numexpr_option_incompatible_op():
         tm.assert_frame_equal(result, expected)
 
 
-@td.skip_if_no_ne
+@td.skip_if_no("numexpr")
 def test_invalid_parser():
     msg = "Invalid parser 'asdf' passed"
     with pytest.raises(KeyError, match=msg):
@@ -1851,7 +1894,7 @@ def test_bool_ops_fails_on_scalars(lhs, cmp, rhs, engine, parser):
     ],
 )
 def test_equals_various(other):
-    df = DataFrame({"A": ["a", "b", "c"]})
+    df = DataFrame({"A": ["a", "b", "c"]}, dtype=object)
     result = df.eval(f"A == {other}")
     expected = Series([False, False, False], name="A")
     if USE_NUMEXPR:
@@ -1903,7 +1946,7 @@ def test_negate_lt_eq_le(engine, parser):
 def test_eval_no_support_column_name(request, column):
     # GH 44603
     if column in ["True", "False", "inf", "Inf"]:
-        request.node.add_marker(
+        request.applymarker(
             pytest.mark.xfail(
                 raises=KeyError,
                 reason=f"GH 47859 DataFrame eval not supported with {column}",
@@ -1920,14 +1963,15 @@ def test_eval_no_support_column_name(request, column):
     tm.assert_frame_equal(result, expected)
 
 
-def test_set_inplace(using_copy_on_write):
+def test_set_inplace(using_copy_on_write, warn_copy_on_write):
     # https://github.com/pandas-dev/pandas/issues/47449
     # Ensure we don't only update the DataFrame inplace, but also the actual
     # column values, such that references to this column also get updated
     df = DataFrame({"A": [1, 2, 3], "B": [4, 5, 6], "C": [7, 8, 9]})
     result_view = df[:]
     ser = df["A"]
-    df.eval("A = B + C", inplace=True)
+    with tm.assert_cow_warning(warn_copy_on_write):
+        df.eval("A = B + C", inplace=True)
     expected = DataFrame({"A": [11, 13, 15], "B": [4, 5, 6], "C": [7, 8, 9]})
     tm.assert_frame_equal(df, expected)
     if not using_copy_on_write:

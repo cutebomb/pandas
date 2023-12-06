@@ -84,11 +84,6 @@ def data_missing_for_sorting(request):
 
 
 @pytest.fixture
-def na_value():
-    return np.nan
-
-
-@pytest.fixture
 def na_cmp():
     return lambda left, right: pd.isna(left) and pd.isna(right)
 
@@ -108,10 +103,6 @@ class BaseSparseTests:
         if data.dtype == SparseDtype(int, 0):
             pytest.skip("Can't store nan in int array.")
 
-    @pytest.mark.xfail(reason="SparseArray does not support setitem")
-    def test_ravel(self, data):
-        super().test_ravel(data)
-
 
 class TestDtype(BaseSparseTests, base.BaseDtypeTests):
     def test_array_type_with_arg(self, data, dtype):
@@ -119,13 +110,7 @@ class TestDtype(BaseSparseTests, base.BaseDtypeTests):
 
 
 class TestInterface(BaseSparseTests, base.BaseInterfaceTests):
-    def test_copy(self, data):
-        # __setitem__ does not work, so we only have a smoke-test
-        data.copy()
-
-    def test_view(self, data):
-        # __setitem__ does not work, so we only have a smoke-test
-        data.view()
+    pass
 
 
 class TestConstructors(BaseSparseTests, base.BaseConstructorsTests):
@@ -148,6 +133,9 @@ class TestReshaping(BaseSparseTests, base.BaseReshapingTests):
         )
         tm.assert_frame_equal(result, expected)
 
+    @pytest.mark.filterwarnings(
+        "ignore:The previous implementation of stack is deprecated"
+    )
     @pytest.mark.parametrize(
         "columns",
         [
@@ -185,10 +173,6 @@ class TestReshaping(BaseSparseTests, base.BaseReshapingTests):
         self._check_unsupported(data)
         super().test_merge(data, na_value)
 
-    @pytest.mark.xfail(reason="SparseArray does not support setitem")
-    def test_transpose(self, data):
-        super().test_transpose(data)
-
 
 class TestGetitem(BaseSparseTests, base.BaseGetitemTests):
     def test_get(self, data):
@@ -204,7 +188,8 @@ class TestGetitem(BaseSparseTests, base.BaseGetitemTests):
         super().test_reindex(data, na_value)
 
 
-# Skipping TestSetitem, since we don't implement it.
+class TestSetitem(BaseSparseTests, base.BaseSetitemTests):
+    pass
 
 
 class TestIndex(base.BaseIndexTests):
@@ -232,14 +217,16 @@ class TestMissing(BaseSparseTests, base.BaseMissingTests):
 
     def test_fillna_no_op_returns_copy(self, data, request):
         if np.isnan(data.fill_value):
-            request.node.add_marker(
+            request.applymarker(
                 pytest.mark.xfail(reason="returns array with different fill value")
             )
         super().test_fillna_no_op_returns_copy(data)
 
     @pytest.mark.xfail(reason="Unsupported")
-    def test_fillna_series(self):
+    def test_fillna_series(self, data_missing):
         # this one looks doable.
+        # TODO: this fails bc we do not pass through data_missing. If we did,
+        #  the 0-fill case would xpass
         super().test_fillna_series()
 
     def test_fillna_frame(self, data_missing):
@@ -366,15 +353,10 @@ class TestMethods(BaseSparseTests, base.BaseMethodsTests):
 
 
 class TestCasting(BaseSparseTests, base.BaseCastingTests):
-    def test_astype_str(self, data):
-        # pre-2.0 this would give a SparseDtype even if the user asked
-        #  for a non-sparse dtype.
-        result = pd.Series(data[:5]).astype(str)
-        expected = pd.Series([str(x) for x in data[:5]], dtype=object)
-        tm.assert_series_equal(result, expected)
-
     @pytest.mark.xfail(raises=TypeError, reason="no sparse StringDtype")
-    def test_astype_string(self, data):
+    def test_astype_string(self, data, nullable_string_dtype):
+        # TODO: this fails bc we do not pass through nullable_string_dtype;
+        #  If we did, the 0-cases would xpass
         super().test_astype_string(data)
 
 
@@ -412,7 +394,7 @@ class TestArithmeticOps(BaseSparseTests, base.BaseArithmeticOpsTests):
             "rmod",
         ]:
             mark = pytest.mark.xfail(reason="result dtype.fill_value mismatch")
-            request.node.add_marker(mark)
+            request.applymarker(mark)
         super().test_arith_frame_with_scalar(data, all_arithmetic_operators)
 
 

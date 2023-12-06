@@ -53,11 +53,6 @@ def data_missing_for_sorting():
 
 
 @pytest.fixture
-def na_value(dtype):
-    return dtype.na_value
-
-
-@pytest.fixture
 def na_cmp():
     return operator.eq
 
@@ -76,11 +71,6 @@ def data_for_grouping():
             {"c": 2},
         ]
     )
-
-
-@pytest.fixture
-def data_for_twos(dtype):
-    pytest.skip("Not a numeric dtype")
 
 
 class BaseJSON:
@@ -247,7 +237,7 @@ class TestMethods(BaseJSON, base.BaseMethodsTests):
     ):
         if using_copy_on_write:
             mark = pytest.mark.xfail(reason="Fails with CoW")
-            request.node.add_marker(mark)
+            request.applymarker(mark)
         super().test_equals_same_data_different_object(data)
 
 
@@ -310,17 +300,16 @@ class TestArithmeticOps(BaseJSON, base.BaseArithmeticOpsTests):
     def test_arith_frame_with_scalar(self, data, all_arithmetic_operators, request):
         if len(data[0]) != 1:
             mark = pytest.mark.xfail(reason="raises in coercing to Series")
-            request.node.add_marker(mark)
+            request.applymarker(mark)
         super().test_arith_frame_with_scalar(data, all_arithmetic_operators)
-
-    def test_add_series_with_extension_array(self, data):
-        ser = pd.Series(data)
-        with pytest.raises(TypeError, match="unsupported"):
-            ser + data
 
 
 class TestComparisonOps(BaseJSON, base.BaseComparisonOpsTests):
-    pass
+    def test_compare_array(self, data, comparison_op, request):
+        if comparison_op.__name__ in ["eq", "ne"]:
+            mark = pytest.mark.xfail(reason="Comparison methods not implemented")
+            request.applymarker(mark)
+        super().test_compare_array(data, comparison_op)
 
 
 class TestPrinting(BaseJSON, base.BasePrintingTests):
