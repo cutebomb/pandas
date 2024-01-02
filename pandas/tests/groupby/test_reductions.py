@@ -362,7 +362,7 @@ def test_max_min_non_numeric():
     assert "ss" in result
 
 
-def test_max_min_object_multiple_columns(using_array_manager):
+def test_max_min_object_multiple_columns():
     # GH#41111 case where the aggregation is valid for some columns but not
     # others; we split object blocks column-wise, consistent with
     # DataFrame._reduce
@@ -375,8 +375,7 @@ def test_max_min_object_multiple_columns(using_array_manager):
         }
     )
     df._consolidate_inplace()  # should already be consolidate, but double-check
-    if not using_array_manager:
-        assert len(df._mgr.blocks) == 2
+    assert len(df._mgr.blocks) == 2
 
     gb = df.groupby("A")
 
@@ -1057,3 +1056,27 @@ def test_regression_allowlist_methods(op, axis, skipna, sort):
         if sort:
             expected = expected.sort_index(axis=axis)
         tm.assert_frame_equal(result, expected)
+
+
+def test_groupby_prod_with_int64_dtype():
+    # GH#46573
+    data = [
+        [1, 11],
+        [1, 41],
+        [1, 17],
+        [1, 37],
+        [1, 7],
+        [1, 29],
+        [1, 31],
+        [1, 2],
+        [1, 3],
+        [1, 43],
+        [1, 5],
+        [1, 47],
+        [1, 19],
+        [1, 88],
+    ]
+    df = DataFrame(data, columns=["A", "B"], dtype="int64")
+    result = df.groupby(["A"]).prod().reset_index()
+    expected = DataFrame({"A": [1], "B": [180970905912331920]}, dtype="int64")
+    tm.assert_frame_equal(result, expected)
